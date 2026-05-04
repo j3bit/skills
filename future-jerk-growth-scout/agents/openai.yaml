@@ -1,0 +1,4 @@
+interface:
+  display_name: "Future Jerk Growth Scout"
+  short_description: "Find underrecognized future jerk-growth public equities"
+  default_prompt: "Use $future-jerk-growth-scout to find, compare, and rank underrecognized future jerk-growth public companies by separating business acceleration, estimate revision acceleration, and crowding."
