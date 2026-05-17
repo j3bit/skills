@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "local-plugins",
+  "description": "Local skills and plugins managed under ~/Dev/skills/.",
+  "owner": {
+    "name": "Local"
+  },
+  "plugins": [
+    {
+      "name": "the-code-guru",
+      "description": "Artifact-gated code smell diagnosis, strangler-fig refactoring prescription, and controlled treatment grounded in Dive Into Refactoring.",
+      "author": {
+        "name": "Local"
+      },
+      "category": "development",
+      "source": "./the-code-guru"
+    }
+  ]
+}
