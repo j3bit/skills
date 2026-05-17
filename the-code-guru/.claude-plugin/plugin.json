@@ -1,0 +1,16 @@
+{
+  "name": "the-code-guru",
+  "version": "0.1.0",
+  "description": "Artifact-gated code smell diagnosis, strangler-fig refactoring prescription, and controlled treatment grounded in Dive Into Refactoring.",
+  "author": {
+    "name": "Local"
+  },
+  "keywords": [
+    "refactoring",
+    "code-smells",
+    "strangler-fig",
+    "diagnosis",
+    "prescription",
+    "treatment"
+  ]
+}
