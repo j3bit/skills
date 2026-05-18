@@ -1,2 +1,18 @@
+# Local OMX/session artifacts
 .omx/
+
+# OS/editor noise
+.DS_Store
+**/.DS_Store
+
+# Node/package-manager artifacts for plugin fixtures
+**/node_modules/
+**/npm-debug.log*
+**/yarn-debug.log*
+**/yarn-error.log*
+
+# Generated code-intel init/doctor reports; keep authored docs such as docs/superpowers tracked.
+code-intel/**/docs/code-intel/
+
+# Vendored/source reference dumps that are regenerated locally
 the-code-guru/references/source/
