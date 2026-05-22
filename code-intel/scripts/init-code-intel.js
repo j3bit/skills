@@ -31,11 +31,11 @@ function astGrepSmoke(repoRoot, language, info, discovery) {
 }
 
 function lspInitializeSmoke(repoRoot, language, info, discovery) {
-  if (info.lsp !== 'available') return { status: 'skipped', reason: 'no LSP command detected' };
+  if (info.lsp !== 'commandDetected') return { status: 'skipped', reason: 'no LSP command detected' };
   const example = discovery.inventory.languages[language]?.examples?.[0];
   if (!example) return { status: 'skipped', reason: 'no sample file detected for language' };
   const result = lspTool('textDocument/documentSymbol', { repoRoot, language, file: example, timeoutMs: 5000 });
-  if (result.status === 'ok') return { status: 'passed', file: example, command: result.command, serverInfo: result.serverInfo || null };
+  if (result.status === 'ok') return { status: 'passed', file: example, command: result.command, serverInfo: result.serverInfo || null, methodVerified: result.methodVerified || 'documentSymbol' };
   return { status: 'failed', file: example, command: result.command || info.lspCommand, reason: result.fallbackReason || result.error?.message || result.status };
 }
 
@@ -43,7 +43,7 @@ function markdownCapability(discovery) {
   const lines = ['# Code Intel Capability Report', '', `Generated: ${discovery.generatedAt}`, `Repository: \`${discovery.repoRoot}\``, '', '## Tooling', '', `- ast-grep: ${discovery.tools.astGrep.available ? 'available' : 'missing'}`, `- command policy: use \`ast-grep\`; this plugin does not call sg.`, '', '## Languages', ''];
   for (const [language, info] of Object.entries(discovery.languages)) {
     if (!info.presentFiles) continue;
-    lines.push(`### ${language}`, '', `- files: ${info.presentFiles}`, `- AST: ${info.astGrep}`, `- ast-grep smoke: ${info.astGrepSmoke?.status || 'not-run'}`, `- LSP: ${info.lsp}${info.lspCommand ? ` (${info.lspCommand})` : ''}`, `- LSP initialize smoke: ${info.lspInitializeSmoke?.status || 'not-run'}`, `- fallback: ${info.fallback.join(', ')}`, '');
+    lines.push(`### ${language}`, '', `- files: ${info.presentFiles}`, `- AST: ${info.astGrep}`, `- ast-grep smoke: ${info.astGrepSmoke?.status || 'not-run'}`, `- LSP: ${info.lsp}${info.lspCommand ? ` (${info.lspCommand}; method readiness requires smoke)` : ''}`, `- LSP initialize smoke: ${info.lspInitializeSmoke?.status || 'not-run'}`, `- fallback: ${info.fallback.join(', ')}`, '');
   }
   if (!Object.values(discovery.languages).some((l) => l.presentFiles)) lines.push('No adapter-supported files detected.', '');
   lines.push('## Fallback', '', discovery.fallbackPolicy, '');
@@ -80,7 +80,7 @@ const profile = {
   pluginVersion: discovery.pluginVersion,
   adapterRegistryVersion: discovery.adapterRegistryVersion,
   tools: discovery.tools,
-  languages: Object.fromEntries(Object.entries(discovery.languages).filter(([, v]) => v.presentFiles > 0).map(([k, v]) => [k, { astGrep: v.astGrep, astGrepLanguageId: v.astGrepLanguageId, astGrepSmoke: v.astGrepSmoke, lsp: v.lsp, lspCommand: v.lspCommand, lspInitializeSmoke: v.lspInitializeSmoke, fallback: v.fallback, files: v.presentFiles }])),
+  languages: Object.fromEntries(Object.entries(discovery.languages).filter(([, v]) => v.presentFiles > 0).map(([k, v]) => [k, { astGrep: v.astGrep, astGrepLanguageId: v.astGrepLanguageId, astGrepSmoke: v.astGrepSmoke, lsp: v.lsp, lspState: v.lspState, lspCommand: v.lspCommand, lspInitializeSmoke: v.lspInitializeSmoke, methodVerified: v.lspInitializeSmoke?.status === 'passed' ? ['documentSymbol'] : [], fallback: v.fallback, files: v.presentFiles }])),
   inventory: discovery.inventory,
   staleRules: ['repo root differs', 'adapter registry version differs', 'plugin version differs', 'profile timestamp predates material plugin upgrade', 'language inventory major mismatch'],
   commandPolicy: 'this plugin does not call sg'

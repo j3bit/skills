@@ -34,6 +34,7 @@ const manifest = readJson('.codex-plugin/plugin.json');
 check('manifest required fields', ['name','version','description','skills','interface'].every((k) => manifest[k]), Object.keys(manifest).join(', '));
 check('manifest name is code-intel', manifest.name === 'code-intel', manifest.name);
 check('mcp server manifest exists', exists('.mcp.json'), '.mcp.json');
+check('hook manifest declared when hooks are shipped', manifest.hooks === './hooks/hooks.json' && exists('hooks/hooks.json'), manifest.hooks || '(missing)');
 for (const skill of SKILLS) check(`skill ${skill} exists`, exists(`skills/${skill}/SKILL.md`), `skills/${skill}/SKILL.md`);
 for (const ref of REFS) check(`reference ${ref} exists`, exists(`references/${ref}`), `references/${ref}`);
 check('adapter schema exists', exists('adapters/schema.json'), 'adapters/schema.json');
@@ -86,6 +87,13 @@ const missingAst = callTool('ast_grep_search', { repoRoot: ROOT, language: 'defi
 check('ast-grep unsupported language reports unavailable cleanly', missingAst.status === 'unavailable' && missingAst.fallbackReason.includes('unsupported'), JSON.stringify(missingAst));
 const missingLsp = callTool('lsp_find_references', { repoRoot: ROOT, language: 'json', file: 'package.json', position: { line: 0, character: 0 } });
 check('LSP tool reports unavailable cleanly when no server declared', missingLsp.status === 'unavailable' && missingLsp.fallbackReason, JSON.stringify(missingLsp));
+const noAstPath = run(process.execPath, ['mcp/code-intel-server/index.js', '--call-tool', 'ast_grep_search', '--args', JSON.stringify({ repoRoot: ROOT, language: 'typescript', pattern: 'class $A' })], { env: { ...process.env, PATH: '/usr/bin:/bin' } });
+try {
+  const noAst = JSON.parse(noAstPath.stdout || '{}');
+  check('missing ast-grep PATH simulation reports explicit fallback', noAst.status === 'unavailable' && noAst.fallbackReason.includes('ast-grep executable was not found') && noAst.commandPolicy.includes('sg'), noAstPath.stdout.slice(0, 500) || noAstPath.stderr.slice(0, 500));
+} catch (error) {
+  check('missing ast-grep PATH simulation reports explicit fallback', false, error.message);
+}
 const fakeLspRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-fake-lsp-'));
 try {
   const fakeRegistry = {
@@ -101,20 +109,32 @@ try {
   };
   const fakeRegistryPath = path.join(fakeLspRoot, 'registry.json');
   writeJson(fakeRegistryPath, fakeRegistry);
+  const pathEscapeProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), language: 'typescript', file: '../python-basic/example.py' })], {
+    env: { ...process.env, CODE_INTEL_REGISTRY_PATH: fakeRegistryPath }
+  });
+  const absolutePathProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), language: 'typescript', file: path.join(ROOT, 'fixtures/repos/typescript-basic/src/math.ts') })], {
+    env: { ...process.env, CODE_INTEL_REGISTRY_PATH: fakeRegistryPath }
+  });
+  const pathEscapeOutput = JSON.parse(pathEscapeProbe.stdout || '{}');
+  const absolutePathOutput = JSON.parse(absolutePathProbe.stdout || '{}');
+  check('LSP rejects repo path traversal before reading files', pathEscapeOutput.status === 'unavailable' && /escapes repo root|outside repo root/.test(pathEscapeOutput.fallbackReason || ''), pathEscapeProbe.stdout.slice(0, 500) || pathEscapeProbe.stderr.slice(0, 500));
+  check('LSP rejects absolute file paths before reading files', absolutePathOutput.status === 'unavailable' && /repo-relative/.test(absolutePathOutput.fallbackReason || ''), absolutePathProbe.stdout.slice(0, 500) || absolutePathProbe.stderr.slice(0, 500));
   const lspProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), file: 'src/math.ts' })], {
     env: { ...process.env, CODE_INTEL_REGISTRY_PATH: fakeRegistryPath }
   });
   const lspOutput = JSON.parse(lspProbe.stdout || '{}');
-  check('LSP tools execute real JSON-RPC operation when server is available', lspProbe.status === 0 && lspOutput.status === 'ok' && lspOutput.method === 'textDocument/documentSymbol' && Array.isArray(lspOutput.result), lspProbe.stdout.slice(0, 500) || lspProbe.stderr.slice(0, 500));
+  check('LSP tools execute real JSON-RPC operation when server is available', lspProbe.status === 0 && lspOutput.status === 'ok' && lspOutput.method === 'textDocument/documentSymbol' && lspOutput.lspState === 'methodVerified' && Array.isArray(lspOutput.result), lspProbe.stdout.slice(0, 500) || lspProbe.stderr.slice(0, 500));
 } catch (error) {
   check('LSP tools execute real JSON-RPC operation when server is available', false, error.message);
 } finally {
   fs.rmSync(fakeLspRoot, { recursive: true, force: true });
 }
 const previewBefore = fs.readFileSync(path.join(ROOT, 'fixtures/repos/typescript-basic/src/math.ts'), 'utf8');
-callTool('ast_grep_replace_preview', { repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), language: 'typescript', pattern: 'add($A, $B)', replacement: 'sum($A, $B)', maxResults: 5 });
+const previewResult = callTool('ast_grep_replace_preview', { repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), language: 'typescript', pattern: 'add($A, $B)', replacement: 'sum($A, $B)', maxResults: 5 });
 const previewAfter = fs.readFileSync(path.join(ROOT, 'fixtures/repos/typescript-basic/src/math.ts'), 'utf8');
 check('preview tools do not mutate files', previewBefore === previewAfter, 'typescript fixture unchanged');
+check('replace preview is honest match-only unless substitution is proven', previewResult.previewOnly === true && previewResult.mutated === false && previewResult.mode === 'match-only' && previewResult.manualEditRequired === true && (previewResult.patchCandidates || []).every((candidate) => !Object.prototype.hasOwnProperty.call(candidate, 'after') && candidate.replacementTemplate), JSON.stringify(previewResult).slice(0, 800));
+check('ast-grep result rows include language evidence', (previewResult.patchCandidates || []).every((candidate) => candidate.confidence === 'ast-grep'), JSON.stringify(previewResult).slice(0, 500));
 
 // Init workflow validation
 const initTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-fixtures-'));
@@ -154,11 +174,18 @@ try {
   const doctor = JSON.parse(doctorRun.stdout || '{}');
   const reasons = (doctor.findings || []).map((finding) => finding.reason).join(' | ');
   check('doctor detects stale routing profile version and inventory mismatch', reasons.includes('plugin version differs') && reasons.includes('adapter registry version differs') && reasons.includes('language inventory major mismatch'), reasons);
+  fs.writeFileSync(path.join(staleDocs, 'routing-profile.json'), '{bad json');
+  const corruptDoctorRun = run('node', ['scripts/doctor-code-intel.js', '--repo', staleTmpRoot, '--json']);
+  const corruptDoctor = JSON.parse(corruptDoctorRun.stdout || '{}');
+  const corruptReasons = (corruptDoctor.findings || []).map((finding) => finding.reason).join(' | ');
+  check('doctor survives malformed routing profile and reports live fallback', corruptDoctorRun.status === 0 && corruptReasons.includes('routing profile unreadable'), corruptReasons || corruptDoctorRun.stderr);
 } finally {
   fs.rmSync(staleTmpRoot, { recursive: true, force: true });
 }
 
 // Hook validation
+const hookManifest = readJson('hooks/hooks.json');
+check('hook manifest wires soft hook commands', ['UserPromptSubmit','PreToolUse','PostToolUse'].every((hook) => JSON.stringify(hookManifest.hooks?.[hook] || '').includes('${PLUGIN_ROOT}/hooks/')), JSON.stringify(hookManifest).slice(0, 500));
 const hookCases = [
   ['hooks/user-prompt-submit.js', 'rename symbol and find references', 'UserPromptSubmit'],
   ['hooks/pre-tool-use.js', '{"cmd":"rg class Foo"}', 'PreToolUse'],
@@ -174,6 +201,17 @@ const preAllow = run('node', ['hooks/pre-tool-use.js'], { input: '{"cmd":"rg TOD
 check('PreToolUse does not block ordinary rg', preAllow.status === 0, `stdout bytes=${preAllow.stdout.length}`);
 const preManualReplace = run('node', ['hooks/pre-tool-use.js'], { input: '{"tool":"apply_patch","description":"replace function add with sum across files"}' });
 check('PreToolUse nudges manual structural replace/edit patterns', preManualReplace.status === 0 && preManualReplace.stdout.includes('code-intel') && preManualReplace.stdout.includes('allow'), preManualReplace.stdout || preManualReplace.stderr);
+const splitFrame = run('python3', ['-c', `import json, subprocess, time
+msg={"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}
+body=json.dumps(msg,separators=(',',':')).encode()
+raw=b'Content-Length: '+str(len(body)).encode()+b'\\r\\n\\r\\n'+body
+p=subprocess.Popen(['node','mcp/code-intel-server/index.js'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+p.stdin.write(raw[:4]); p.stdin.flush(); time.sleep(0.05)
+p.stdin.write(raw[4:]); p.stdin.close()
+out,err=p.communicate(timeout=5)
+assert p.returncode == 0 and b'Content-Length:' in out and b'code-intel' in out and b'error' not in out.lower(), out+err
+print('split framed initialize ok')`]);
+check('MCP split framed initialize works without parse error', splitFrame.status === 0, splitFrame.stdout || splitFrame.stderr);
 
 // Behavior scenarios
 const behavior = [

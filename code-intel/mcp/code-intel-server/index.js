@@ -72,7 +72,14 @@ async function processBuffer() {
   while (buffer.length) {
     if (framedMode === null) {
       const text = buffer.toString('utf8', 0, Math.min(buffer.length, 32));
-      framedMode = /^Content-Length:/i.test(text);
+      if (/^Content-Length:/i.test(text)) framedMode = true;
+      else {
+        const headerPrefix = 'Content-Length:';
+        if (headerPrefix.toLowerCase().startsWith(text.toLowerCase())) return;
+        const newline = buffer.indexOf('\n');
+        if (newline < 0) return;
+        framedMode = false;
+      }
     }
     if (framedMode) {
       const headerEnd = buffer.indexOf('\r\n\r\n');
@@ -106,5 +113,5 @@ process.stdin.on('data', async (chunk) => {
   await processBuffer();
 });
 process.stdin.on('end', async () => {
-  if (buffer.length && framedMode === false) await processJsonLine(buffer.toString('utf8'));
+  if (buffer.length && framedMode !== true) await processJsonLine(buffer.toString('utf8'));
 });

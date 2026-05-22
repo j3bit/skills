@@ -143,6 +143,32 @@ export function walkFiles(repoRoot, max = 5000) {
   return out;
 }
 
+function realpathIfExists(target) {
+  try { return fs.realpathSync(target); }
+  catch { return null; }
+}
+
+function insideDir(root, target) {
+  const rel = path.relative(root, target);
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+export function resolveRepoRelativeFile(repoRoot, file) {
+  if (!file) return { ok: false, reason: 'file is required for LSP operation' };
+  if (path.isAbsolute(file)) return { ok: false, reason: 'file must be repo-relative, not absolute' };
+  const resolvedRoot = path.resolve(repoRoot || process.cwd());
+  const canonicalRoot = realpathIfExists(resolvedRoot) || resolvedRoot;
+  const candidate = path.resolve(canonicalRoot, file);
+  if (!insideDir(canonicalRoot, candidate)) {
+    return { ok: false, reason: `file escapes repo root: ${file}` };
+  }
+  const realCandidate = realpathIfExists(candidate);
+  if (realCandidate && !insideDir(canonicalRoot, realCandidate)) {
+    return { ok: false, reason: `file resolves outside repo root: ${file}` };
+  }
+  return { ok: true, repoRoot: canonicalRoot, filePath: realCandidate || candidate };
+}
+
 export function adapterForFile(file, registry = loadRegistry()) {
   const ext = path.extname(file).toLowerCase();
   return registry.adapters.find((a) => a.extensions.includes(ext));
@@ -185,7 +211,10 @@ export function discoverCapabilities(repoRoot = process.cwd()) {
       extensions: adapter.extensions,
       astGrep: ast.available && adapter.astGrep.supported === 'builtin' ? 'available' : 'unavailable',
       astGrepLanguageId: adapter.astGrep.languageId,
-      lsp: lspAvailable ? 'available' : 'missing',
+      lsp: lspAvailable ? 'commandDetected' : 'missing',
+      lspState: lspAvailable ? 'commandDetected' : 'missing',
+      methodVerified: [],
+      methodUnsupported: [],
       lspCommand: lspAvailable,
       lspCommands,
       capabilities: adapter.lsp.capabilities,
@@ -211,6 +240,24 @@ export function discoverCapabilities(repoRoot = process.cwd()) {
   };
 }
 
+export function resolveCapabilityRoute(args = {}) {
+  const discovery = discoverCapabilities(args.repoRoot || process.cwd());
+  const language = args.language || (args.file ? adapterForFile(path.resolve(args.repoRoot || process.cwd(), args.file))?.language : null);
+  const info = language ? discovery.languages[language] : null;
+  if (!info) {
+    return { status: 'fallback', language, route: ['rg', 'grep'], fallbackReason: 'unsupported language or missing language hint' };
+  }
+  if (args.intent === 'semantic' || args.intent === 'diagnostics' || args.intent === 'rename') {
+    if (info.lsp === 'commandDetected') {
+      return { status: 'try-lsp', language, route: ['lsp', 'ast-grep', 'rg', 'grep'], capabilityState: info.lspState, fallbackReason: 'LSP command detected; method readiness must be verified by the LSP tool response' };
+    }
+    if (info.astGrep === 'available') return { status: 'try-ast-grep', language, route: ['ast-grep', 'rg', 'grep'], fallbackReason: 'LSP command missing' };
+    return { status: 'fallback', language, route: ['rg', 'grep'], fallbackReason: 'LSP and ast-grep unavailable' };
+  }
+  if (info.astGrep === 'available') return { status: 'try-ast-grep', language, route: ['ast-grep', 'rg', 'grep'], fallbackReason: null };
+  return { status: 'fallback', language, route: ['rg', 'grep'], fallbackReason: 'ast-grep unavailable or unsupported' };
+}
+
 function astUnavailable(language, reason = 'ast-grep executable was not found on PATH') {
   return {
     status: 'unavailable',
@@ -222,7 +269,7 @@ function astUnavailable(language, reason = 'ast-grep executable was not found on
   };
 }
 
-function normalizeAstGrepJson(stdout) {
+function normalizeAstGrepJson(stdout, language = null) {
   if (!stdout.trim()) return [];
   const parsed = JSON.parse(stdout);
   const rows = Array.isArray(parsed) ? parsed : [parsed];
@@ -230,7 +277,7 @@ function normalizeAstGrepJson(stdout) {
     file: item.file || item.path || item.filePath || null,
     range: item.range || item.metaVariables?.single?.range || null,
     match: item.text || item.lines || item.match || item.source || null,
-    language: item.language || null,
+    language: item.language || language,
     confidence: 'ast-grep'
   }));
 }
@@ -262,7 +309,7 @@ export function astGrepSearch(args = {}) {
     };
   }
   let results = [];
-  try { results = normalizeAstGrepJson(result.stdout).slice(0, args.maxResults || 100); }
+  try { results = normalizeAstGrepJson(result.stdout, lang).slice(0, args.maxResults || 100); }
   catch (error) { return { status: 'error', error: `failed to parse ast-grep JSON: ${error.message}`, raw: result.stdout.slice(0, 1000), fallback: ['rg', 'grep'] }; }
   return { status: 'ok', executable: 'ast-grep', language: lang, patternSummary: pattern.slice(0, 120), results, fallback: results.length ? [] : ['rg', 'grep'], fallbackReason: results.length ? null : 'ast-grep returned no matches; text supplement may be useful' };
 }
@@ -275,8 +322,11 @@ export function astGrepReplacePreview(args = {}) {
     status: 'ok',
     previewOnly: true,
     mutated: false,
+    mode: 'match-only',
     replacementSummary: String(replacement).slice(0, 120),
-    patchCandidates: search.results.map((r) => ({ file: r.file, range: r.range, before: r.match, after: replacement, confidence: r.confidence })),
+    manualEditRequired: true,
+    note: 'Match-only preview: replacement templates are not expanded by this MVP tool. Apply edits through normal Codex file editing after reviewing candidates.',
+    patchCandidates: search.results.map((r) => ({ file: r.file, range: r.range, before: r.match, replacementTemplate: replacement, confidence: r.confidence, mode: 'match-only' })),
     fallback: search.fallback,
     fallbackReason: search.fallbackReason
   };
@@ -361,9 +411,9 @@ function lspParams(method, uri, args = {}) {
 }
 
 export function runLspRequest(commandLine, adapter, method, args = {}) {
-  const repoRoot = path.resolve(args.repoRoot || process.cwd());
-  if (!args.file) return lspUnavailable(method, { ...args, language: adapter.language }, 'file is required for LSP operation');
-  const filePath = path.resolve(repoRoot, args.file);
+  const resolved = resolveRepoRelativeFile(args.repoRoot || process.cwd(), args.file);
+  if (!resolved.ok) return lspUnavailable(method, { ...args, language: adapter.language }, resolved.reason);
+  const { repoRoot, filePath } = resolved;
   if (!fs.existsSync(filePath)) return lspUnavailable(method, { ...args, language: adapter.language }, `file not found: ${args.file}`);
   const commandParts = splitCommandLine(commandLine);
   if (!commandParts.length) return lspUnavailable(method, { ...args, language: adapter.language }, 'LSP command candidate is empty');
@@ -419,12 +469,15 @@ export function runLspRequest(commandLine, adapter, method, args = {}) {
     };
   }
   if (response && Object.prototype.hasOwnProperty.call(response, 'result')) {
+    const methodCapability = method.split('/').pop();
     return {
       status: 'ok',
       method,
       language: adapter.language,
       command: commandLine,
       serverInfo: initialize?.result?.serverInfo || null,
+      lspState: 'methodVerified',
+      methodVerified: methodCapability,
       result: response.result,
       previewOnly: method === 'textDocument/rename' ? true : undefined,
       mutated: method === 'textDocument/rename' ? false : undefined,
@@ -471,7 +524,7 @@ const commonProps = {
 };
 
 export const tools = TOOL_NAMES.map((name) => {
-  const base = { name, description: '', inputSchema: { type: 'object', properties: {}, additionalProperties: true }, outputSchema: { type: 'object' } };
+  const base = { name, description: '', inputSchema: { type: 'object', properties: {}, additionalProperties: true }, outputSchema: { type: 'object', properties: { status: { type: 'string' }, fallbackReason: { type: ['string', 'null'] } } } };
   if (name === 'capability_discover') {
     base.description = 'Discover code-intel capabilities, language inventory, ast-grep availability, LSP command candidates, and fallback reasons.';
     base.inputSchema.properties = { repoRoot: commonProps.repoRoot };
@@ -486,6 +539,11 @@ export const tools = TOOL_NAMES.map((name) => {
   } else {
     base.description = `Check or preview LSP operation ${name}; degrades gracefully when no server is available.`;
     base.inputSchema.properties = { repoRoot: commonProps.repoRoot, language: commonProps.language, file: commonProps.file, position: commonProps.position, symbol: { type: 'string' }, newName: { type: 'string' } };
+    base.inputSchema.required = ['file'];
+    if (['lsp_goto_definition', 'lsp_find_references', 'lsp_prepare_rename', 'lsp_rename_preview'].includes(name)) {
+      base.inputSchema.required.push('position');
+    }
+    if (name === 'lsp_rename_preview') base.inputSchema.required.push('newName');
   }
   return base;
 });

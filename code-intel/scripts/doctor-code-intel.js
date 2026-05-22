@@ -27,7 +27,12 @@ function inventoryMismatch(profileInventory, liveInventory) {
 function loadProfile(repoRoot, discovery) {
   const file = path.join(repoRoot, 'docs', 'code-intel', 'routing-profile.json');
   if (!fs.existsSync(file)) return { path: file, exists: false, staleReasons: ['routing profile missing; run init-code-intel'] };
-  const profile = readJson(file);
+  let profile;
+  try {
+    profile = readJson(file);
+  } catch (error) {
+    return { path: file, exists: true, profile: null, staleReasons: [`routing profile unreadable: ${error.message}`] };
+  }
   const staleReasons = [];
   if (path.resolve(profile.repoRoot || '') !== repoRoot) staleReasons.push('repo root differs');
   if (!profile.generatedAt) staleReasons.push('profile timestamp missing');
@@ -46,6 +51,7 @@ if (!discovery.tools.astGrep.available) findings.push({ severity: 'degraded', ca
 for (const [language, info] of Object.entries(discovery.languages)) {
   if (!info.presentFiles) continue;
   if (info.lsp === 'missing') findings.push({ severity: 'degraded', capability: `${language} LSP`, reason: 'LSP command missing', fallback: info.astGrep === 'available' ? ['ast-grep', 'rg', 'grep'] : ['rg', 'grep'] });
+  else if (info.lsp === 'commandDetected') findings.push({ severity: 'info', capability: `${language} LSP`, reason: 'LSP command detected; method readiness requires initialize/method smoke', fallback: info.astGrep === 'available' ? ['ast-grep', 'rg', 'grep'] : ['rg', 'grep'] });
 }
 for (const reason of profile.staleReasons) findings.push({ severity: 'info', capability: 'routing profile', reason, fallback: ['live detection'] });
 const report = { status: findings.some((f) => f.severity === 'degraded') ? 'degraded' : 'ok', repoRoot, generatedAt: discovery.generatedAt, profile, tools: discovery.tools, findings, commandPolicy: 'this plugin does not call sg' };
