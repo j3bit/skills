@@ -195,8 +195,39 @@ const previewBefore = fs.readFileSync(path.join(ROOT, 'fixtures/repos/typescript
 const previewResult = callTool('ast_grep_replace_preview', { repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), language: 'typescript', pattern: 'add($A, $B)', replacement: 'sum($A, $B)', maxResults: 5 });
 const previewAfter = fs.readFileSync(path.join(ROOT, 'fixtures/repos/typescript-basic/src/math.ts'), 'utf8');
 check('preview tools do not mutate files', previewBefore === previewAfter, 'typescript fixture unchanged');
-check('replace preview is honest match-only unless substitution is proven', previewResult.previewOnly === true && previewResult.mutated === false && previewResult.mode === 'match-only' && previewResult.manualEditRequired === true && (previewResult.patchCandidates || []).every((candidate) => !Object.prototype.hasOwnProperty.call(candidate, 'after') && candidate.replacementTemplate), JSON.stringify(previewResult).slice(0, 800));
-check('ast-grep result rows include language evidence', (previewResult.patchCandidates || []).every((candidate) => candidate.confidence === 'ast-grep'), JSON.stringify(previewResult).slice(0, 500));
+const previewUnavailable = previewResult.status === 'unavailable';
+const previewOk = previewResult.status === 'ok';
+check(
+  'replace preview degrades cleanly when ast-grep is unavailable',
+  previewUnavailable
+    ? previewResult.previewOnly === true &&
+      previewResult.mutated === false &&
+      Array.isArray(previewResult.fallback) &&
+      previewResult.fallback.includes('rg') &&
+      /ast-grep executable was not found/.test(previewResult.fallbackReason || '')
+    : true,
+  JSON.stringify(previewResult).slice(0, 800)
+);
+check(
+  'replace preview is honest match-only unless substitution is proven',
+  previewUnavailable ||
+    (previewOk &&
+      previewResult.previewOnly === true &&
+      previewResult.mutated === false &&
+      previewResult.mode === 'match-only' &&
+      previewResult.manualEditRequired === true &&
+      (previewResult.patchCandidates || []).every((candidate) =>
+        !Object.prototype.hasOwnProperty.call(candidate, 'after') &&
+        candidate.replacementTemplate
+      )),
+  JSON.stringify(previewResult).slice(0, 800)
+);
+check(
+  'ast-grep result rows include language evidence when preview is available',
+  previewUnavailable ||
+    (previewResult.patchCandidates || []).every((candidate) => candidate.confidence === 'ast-grep'),
+  JSON.stringify(previewResult).slice(0, 500)
+);
 
 // Init workflow validation
 const initTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-fixtures-'));
