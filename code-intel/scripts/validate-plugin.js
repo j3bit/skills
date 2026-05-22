@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tools, callTool, loadRegistry, splitCommandLine } from '../mcp/code-intel-server/core.js';
 
@@ -17,6 +17,25 @@ function readJson(rel) { return JSON.parse(fs.readFileSync(path.join(ROOT, rel),
 function run(cmd, args, opts = {}) { return spawnSync(cmd, args, { cwd: ROOT, encoding: 'utf8', timeout: 15000, maxBuffer: 10 * 1024 * 1024, ...opts }); }
 function rel(file) { return path.relative(ROOT, file); }
 function writeJson(file, value) { fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n'); }
+function mcpFrame(message) {
+  const body = JSON.stringify(message);
+  return Buffer.from(`Content-Length: ${Buffer.byteLength(body, 'utf8')}\r\n\r\n${body}`);
+}
+function initializeFrame() {
+  return mcpFrame({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'initialize',
+    params: { protocolVersion: '2024-11-05' }
+  });
+}
+function framedInitializeOk(result) {
+  const stdout = result.stdout || '';
+  return result.status === 0 && stdout.includes('Content-Length:') && stdout.includes('code-intel');
+}
+function framedEvidence(result) {
+  return result.stdout || result.stderr || result.error?.message || '';
+}
 function finish() {
   const failed = results.filter((r) => !r.ok);
   const report = { status: failed.length ? 'failed' : 'passed', total: results.length, passed: results.length - failed.length, failed: failed.length, results };
@@ -69,14 +88,8 @@ check('scripts executable or documented', ['scripts/init-code-intel.js','scripts
 // MCP contract validation
 const list = run('node', ['mcp/code-intel-server/index.js', '--list-tools']);
 check('MCP server list-tools starts', list.status === 0, list.stderr || list.stdout.slice(0, 200));
-const framedInit = run('python3', ['-c', `import json, subprocess
-msg={"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}
-body=json.dumps(msg,separators=(',',':')).encode()
-raw=b'Content-Length: '+str(len(body)).encode()+b'\\r\\n\\r\\n'+body
-p=subprocess.run(['node','mcp/code-intel-server/index.js'],input=raw,capture_output=True,timeout=5)
-assert p.returncode == 0 and b'Content-Length:' in p.stdout and b'code-intel' in p.stdout
-print('framed initialize ok')`]);
-check('MCP framed initialize works', framedInit.status === 0, framedInit.stdout || framedInit.stderr);
+const framedInit = run(process.execPath, ['mcp/code-intel-server/index.js'], { input: initializeFrame() });
+check('MCP framed initialize works', framedInitializeOk(framedInit), framedEvidence(framedInit));
 let listed = [];
 try { listed = JSON.parse(list.stdout).tools.map((t) => t.name); } catch {}
 check('tool list includes expected tools', EXPECTED_TOOLS.every((t) => listed.includes(t)), listed.join(', '));
@@ -294,17 +307,46 @@ const preAllow = run('node', ['hooks/pre-tool-use.js'], { input: '{"cmd":"rg TOD
 check('PreToolUse does not block ordinary rg', preAllow.status === 0, `stdout bytes=${preAllow.stdout.length}`);
 const preManualReplace = run('node', ['hooks/pre-tool-use.js'], { input: '{"tool":"apply_patch","description":"replace function add with sum across files"}' });
 check('PreToolUse nudges manual structural replace/edit patterns', preManualReplace.status === 0 && preManualReplace.stdout.includes('code-intel') && preManualReplace.stdout.includes('allow'), preManualReplace.stdout || preManualReplace.stderr);
-const splitFrame = run('python3', ['-c', `import json, subprocess, time
-msg={"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}
-body=json.dumps(msg,separators=(',',':')).encode()
-raw=b'Content-Length: '+str(len(body)).encode()+b'\\r\\n\\r\\n'+body
-p=subprocess.Popen(['node','mcp/code-intel-server/index.js'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-p.stdin.write(raw[:4]); p.stdin.flush(); time.sleep(0.05)
-p.stdin.write(raw[4:]); p.stdin.close()
-out,err=p.communicate(timeout=5)
-assert p.returncode == 0 and b'Content-Length:' in out and b'code-intel' in out and b'error' not in out.lower(), out+err
-print('split framed initialize ok')`]);
-check('MCP split framed initialize works without parse error', splitFrame.status === 0, splitFrame.stdout || splitFrame.stderr);
+const splitFrame = await new Promise((resolve) => {
+  const child = spawn(process.execPath, ['mcp/code-intel-server/index.js'], {
+    cwd: ROOT,
+    stdio: ['pipe', 'pipe', 'pipe']
+  });
+  const raw = initializeFrame();
+  let stdout = '';
+  let stderr = '';
+  let settled = false;
+  const timer = setTimeout(() => {
+    if (settled) return;
+    settled = true;
+    child.kill();
+    resolve({ status: 124, stdout, stderr: stderr || 'timed out waiting for split framed initialize response' });
+  }, 5000);
+  child.stdout.on('data', (chunk) => { stdout += chunk.toString('utf8'); });
+  child.stderr.on('data', (chunk) => { stderr += chunk.toString('utf8'); });
+  child.on('error', (error) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    resolve({ status: 1, stdout, stderr: error.message });
+  });
+  child.on('exit', (code) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    resolve({ status: code ?? 0, stdout, stderr });
+  });
+  child.stdin.write(raw.subarray(0, 4));
+  setTimeout(() => {
+    child.stdin.write(raw.subarray(4));
+    child.stdin.end();
+  }, 50);
+});
+check(
+  'MCP split framed initialize works without parse error',
+  framedInitializeOk(splitFrame) && !splitFrame.stdout.toLowerCase().includes('error'),
+  framedEvidence(splitFrame)
+);
 
 // Behavior scenarios
 const behavior = [
