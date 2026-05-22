@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tools, callTool, loadRegistry } from '../mcp/code-intel-server/core.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -96,31 +96,52 @@ try {
 }
 const fakeLspRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-fake-lsp-'));
 try {
+  const fakeBinDir = path.join(fakeLspRoot, 'bin');
+  fs.mkdirSync(fakeBinDir, { recursive: true });
+  const fakeNoVersionLsp = path.join(fakeBinDir, 'fake-no-version-lsp');
+  fs.writeFileSync(fakeNoVersionLsp, `#!/usr/bin/env node
+if (process.argv.slice(2).includes('--version')) {
+  console.error('fake-no-version-lsp: --version is intentionally unsupported');
+  process.exit(7);
+}
+await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-lsp-server.js')).href)});
+`);
+  fs.chmodSync(fakeNoVersionLsp, 0o755);
   const fakeRegistry = {
     version: 'test-fake-lsp',
     adapters: [{
       language: 'typescript',
       extensions: ['.ts'],
       astGrep: { languageId: 'typescript', supported: 'builtin' },
-      lsp: { commands: [`node ${path.join(ROOT, 'fixtures/lsp/fake-lsp-server.js')}`], capabilities: ['definition', 'references', 'rename', 'diagnostics', 'symbols'] },
+      lsp: { commands: ['fake-no-version-lsp --stdio'], capabilities: ['definition', 'references', 'rename', 'diagnostics', 'symbols'] },
       fallback: ['rg', 'grep'],
       fixtures: { repo: 'fixtures/repos/typescript-basic', expectedAst: true, expectedLsp: true }
     }]
   };
   const fakeRegistryPath = path.join(fakeLspRoot, 'registry.json');
+  const fakeLspEnv = { ...process.env, PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH || ''}`, CODE_INTEL_REGISTRY_PATH: fakeRegistryPath };
   writeJson(fakeRegistryPath, fakeRegistry);
   const pathEscapeProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), language: 'typescript', file: '../python-basic/example.py' })], {
-    env: { ...process.env, CODE_INTEL_REGISTRY_PATH: fakeRegistryPath }
+    env: fakeLspEnv
   });
   const absolutePathProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), language: 'typescript', file: path.join(ROOT, 'fixtures/repos/typescript-basic/src/math.ts') })], {
-    env: { ...process.env, CODE_INTEL_REGISTRY_PATH: fakeRegistryPath }
+    env: fakeLspEnv
   });
   const pathEscapeOutput = JSON.parse(pathEscapeProbe.stdout || '{}');
   const absolutePathOutput = JSON.parse(absolutePathProbe.stdout || '{}');
   check('LSP rejects repo path traversal before reading files', pathEscapeOutput.status === 'unavailable' && /escapes repo root|outside repo root/.test(pathEscapeOutput.fallbackReason || ''), pathEscapeProbe.stdout.slice(0, 500) || pathEscapeProbe.stderr.slice(0, 500));
   check('LSP rejects absolute file paths before reading files', absolutePathOutput.status === 'unavailable' && /repo-relative/.test(absolutePathOutput.fallbackReason || ''), absolutePathProbe.stdout.slice(0, 500) || absolutePathProbe.stderr.slice(0, 500));
+  const lspDiscoveryProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic') })], {
+    env: fakeLspEnv
+  });
+  const lspDiscovery = JSON.parse(lspDiscoveryProbe.stdout || '{}');
+  check(
+    'LSP executable detection does not require --version support',
+    lspDiscovery.languages?.typescript?.lsp === 'commandDetected' && lspDiscovery.languages.typescript.lspCommand === 'fake-no-version-lsp --stdio',
+    lspDiscoveryProbe.stdout.slice(0, 800) || lspDiscoveryProbe.stderr.slice(0, 800)
+  );
   const lspProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), file: 'src/math.ts' })], {
-    env: { ...process.env, CODE_INTEL_REGISTRY_PATH: fakeRegistryPath }
+    env: fakeLspEnv
   });
   const lspOutput = JSON.parse(lspProbe.stdout || '{}');
   check('LSP tools execute real JSON-RPC operation when server is available', lspProbe.status === 0 && lspOutput.status === 'ok' && lspOutput.method === 'textDocument/documentSymbol' && lspOutput.lspState === 'methodVerified' && Array.isArray(lspOutput.result), lspProbe.stdout.slice(0, 500) || lspProbe.stderr.slice(0, 500));

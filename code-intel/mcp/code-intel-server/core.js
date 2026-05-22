@@ -85,6 +85,30 @@ export function detectExecutable(command, args = ['--version']) {
   };
 }
 
+function executableCandidates(command) {
+  const hasPathSeparator = command.includes('/') || (process.platform === 'win32' && /[\\/]/.test(command));
+  const extensions = process.platform === 'win32'
+    ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean)
+    : [''];
+  const names = process.platform === 'win32' && !path.extname(command)
+    ? extensions.map((ext) => `${command}${ext}`)
+    : [command];
+  if (hasPathSeparator) return names;
+  const dirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  return dirs.flatMap((dir) => names.map((name) => path.join(dir, name)));
+}
+
+export function executableOnPath(command) {
+  if (!command) return { command, available: false, reason: 'no executable declared' };
+  for (const candidate of executableCandidates(command)) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return { command, available: true, path: candidate, reason: 'executable found' };
+    } catch {}
+  }
+  return { command, available: false, reason: 'executable not found on PATH' };
+}
+
 export function splitCommandLine(commandLine) {
   const parts = [];
   let current = '';
@@ -121,8 +145,16 @@ function firstToken(commandLine) {
 export function commandAvailable(commandLine) {
   const command = firstToken(commandLine);
   if (!command) return { command: commandLine, available: false, reason: 'no command candidate declared' };
-  const result = detectExecutable(command, ['--version']);
-  return { command: commandLine, executable: command, available: result.available, stderr: result.stderr, stdout: result.stdout, reason: result.available ? 'available' : 'command missing or failed --version' };
+  const result = executableOnPath(command);
+  return {
+    command: commandLine,
+    executable: command,
+    executablePath: result.path || null,
+    available: result.available,
+    reason: result.available
+      ? 'executable found; LSP method readiness requires initialize/method smoke'
+      : result.reason
+  };
 }
 
 export function walkFiles(repoRoot, max = 5000) {
