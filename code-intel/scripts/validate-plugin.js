@@ -183,7 +183,7 @@ try {
       language: 'typescript',
       extensions: ['.ts'],
       astGrep: { languageId: 'typescript', supported: 'builtin' },
-      lsp: { commands: [`node ${path.join(ROOT, 'fixtures/lsp/strict-init-lsp-server.js')}`], capabilities: ['definition', 'references', 'rename', 'diagnostics', 'symbols'] },
+      lsp: { commands: [`node "${path.join(ROOT, 'fixtures/lsp/strict-init-lsp-server.js')}"`], capabilities: ['definition', 'references', 'rename', 'diagnostics', 'symbols'] },
       fallback: ['rg', 'grep'],
       fixtures: { repo: 'fixtures/repos/typescript-basic', expectedAst: true, expectedLsp: true }
     }]
