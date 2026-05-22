@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { tools, callTool, loadRegistry } from '../mcp/code-intel-server/core.js';
+import { tools, callTool, loadRegistry, splitCommandLine } from '../mcp/code-intel-server/core.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const EXPECTED_TOOLS = ['capability_discover','ast_grep_search','ast_grep_replace_preview','lsp_diagnostics','lsp_symbols','lsp_goto_definition','lsp_find_references','lsp_prepare_rename','lsp_rename_preview'];
@@ -83,6 +83,18 @@ check('tool list includes expected tools', EXPECTED_TOOLS.every((t) => listed.in
 for (const tool of tools) check(`tool ${tool.name} schema`, Boolean(tool.name && tool.description && tool.inputSchema && tool.outputSchema), tool.description);
 const discover = callTool('capability_discover', { repoRoot: ROOT });
 check('capability_discover works', Boolean(discover.repoRoot && discover.tools?.astGrep?.command === 'ast-grep'), discover.repoRoot);
+const windowsPathParts = splitCommandLine(String.raw`C:\Tools\pyright-langserver.cmd --stdio`);
+check(
+  'splitCommandLine preserves unquoted Windows path backslashes',
+  windowsPathParts[0] === String.raw`C:\Tools\pyright-langserver.cmd` && windowsPathParts[1] === '--stdio',
+  JSON.stringify(windowsPathParts)
+);
+const quotedWindowsPathParts = splitCommandLine(String.raw`"C:\Program Files\Pyright\pyright-langserver.cmd" --stdio`);
+check(
+  'splitCommandLine preserves quoted Windows path backslashes and spaces',
+  quotedWindowsPathParts[0] === String.raw`C:\Program Files\Pyright\pyright-langserver.cmd` && quotedWindowsPathParts[1] === '--stdio',
+  JSON.stringify(quotedWindowsPathParts)
+);
 const missingAst = callTool('ast_grep_search', { repoRoot: ROOT, language: 'definitely-unsupported', pattern: 'class $A' });
 check('ast-grep unsupported language reports unavailable cleanly', missingAst.status === 'unavailable' && missingAst.fallbackReason.includes('unsupported'), JSON.stringify(missingAst));
 const missingLsp = callTool('lsp_find_references', { repoRoot: ROOT, language: 'json', file: 'package.json', position: { line: 0, character: 0 } });
@@ -149,6 +161,35 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
   check('LSP tools execute real JSON-RPC operation when server is available', false, error.message);
 } finally {
   fs.rmSync(fakeLspRoot, { recursive: true, force: true });
+}
+const strictLspRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-strict-lsp-'));
+try {
+  const strictRegistry = {
+    version: 'test-strict-lsp',
+    adapters: [{
+      language: 'typescript',
+      extensions: ['.ts'],
+      astGrep: { languageId: 'typescript', supported: 'builtin' },
+      lsp: { commands: [`node ${path.join(ROOT, 'fixtures/lsp/strict-init-lsp-server.js')}`], capabilities: ['definition', 'references', 'rename', 'diagnostics', 'symbols'] },
+      fallback: ['rg', 'grep'],
+      fixtures: { repo: 'fixtures/repos/typescript-basic', expectedAst: true, expectedLsp: true }
+    }]
+  };
+  const strictRegistryPath = path.join(strictLspRoot, 'registry.json');
+  writeJson(strictRegistryPath, strictRegistry);
+  const strictProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), file: 'src/math.ts', timeoutMs: 5000 })], {
+    env: { ...process.env, CODE_INTEL_REGISTRY_PATH: strictRegistryPath }
+  });
+  const strictOutput = JSON.parse(strictProbe.stdout || '{}');
+  check(
+    'LSP client waits for initialize before sending follow-up messages',
+    strictProbe.status === 0 && strictOutput.status === 'ok' && strictOutput.serverInfo?.name === 'code-intel-strict-init-lsp' && Array.isArray(strictOutput.result),
+    strictProbe.stdout.slice(0, 800) || strictProbe.stderr.slice(0, 800)
+  );
+} catch (error) {
+  check('LSP client waits for initialize before sending follow-up messages', false, error.message);
+} finally {
+  fs.rmSync(strictLspRoot, { recursive: true, force: true });
 }
 const previewBefore = fs.readFileSync(path.join(ROOT, 'fixtures/repos/typescript-basic/src/math.ts'), 'utf8');
 const previewResult = callTool('ast_grep_replace_preview', { repoRoot: path.join(ROOT, 'fixtures/repos/typescript-basic'), language: 'typescript', pattern: 'add($A, $B)', replacement: 'sum($A, $B)', maxResults: 5 });
