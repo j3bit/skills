@@ -359,6 +359,13 @@ export function astGrepReplacePreview(args = {}) {
   };
 }
 
+function runtimeFallbackUsed(adapter) {
+  if (adapter?.astGrep?.supported === 'builtin' && detectExecutable('ast-grep', ['--version']).available) {
+    return 'ast-grep or rg/grep';
+  }
+  return 'rg/grep';
+}
+
 function lspUnavailable(method, args = {}, reason = 'no LSP server command detected', extra = {}) {
   const registry = loadRegistry();
   const adapter = args.language ? adapterForLanguage(args.language, registry) : args.file ? adapterForFile(path.resolve(args.repoRoot || process.cwd(), args.file), registry) : null;
@@ -369,7 +376,7 @@ function lspUnavailable(method, args = {}, reason = 'no LSP server command detec
     command: null,
     stderrSummary: '',
     degradedCapability: method,
-    fallbackUsed: adapter?.astGrep?.supported === 'builtin' ? 'ast-grep or rg/grep' : 'rg/grep',
+    fallbackUsed: runtimeFallbackUsed(adapter),
     fallbackReason: reason,
     ...extra
   };
@@ -561,7 +568,7 @@ export async function runLspRequestAsync(commandLine, adapter, method, args = {}
         command: commandLine,
         error: response.error,
         stderrSummary: state.stderr.toString('utf8').trim().slice(0, 1000),
-        fallbackUsed: adapter.astGrep.supported === 'builtin' ? 'ast-grep or rg/grep' : 'rg/grep',
+        fallbackUsed: runtimeFallbackUsed(adapter),
         fallbackReason: 'LSP server returned an error'
       };
     }

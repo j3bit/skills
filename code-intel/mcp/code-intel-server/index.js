@@ -28,13 +28,20 @@ if (cli['call-tool']) {
   process.exit(0);
 }
 
+const SUPPORTED_PROTOCOL_VERSIONS = ['2024-11-05'];
+const DEFAULT_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0];
+
+function negotiateProtocolVersion(requested) {
+  return SUPPORTED_PROTOCOL_VERSIONS.includes(requested) ? requested : DEFAULT_PROTOCOL_VERSION;
+}
+
 function result(id, value) { return { jsonrpc: '2.0', id, result: value }; }
 function error(id, code, message) { return { jsonrpc: '2.0', id, error: { code, message } }; }
 
 async function handle(msg) {
   if (msg.method === 'initialize') {
     return result(msg.id, {
-      protocolVersion: msg.params?.protocolVersion || '2024-11-05',
+      protocolVersion: negotiateProtocolVersion(msg.params?.protocolVersion),
       capabilities: { tools: {} },
       serverInfo: { name: 'code-intel', version: '0.1.0' }
     });

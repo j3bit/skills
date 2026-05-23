@@ -29,6 +29,14 @@ function initializeFrame() {
     params: { protocolVersion: '2024-11-05' }
   });
 }
+function unsupportedInitializeFrame() {
+  return mcpFrame({
+    jsonrpc: '2.0',
+    id: 2,
+    method: 'initialize',
+    params: { protocolVersion: '2099-99-99' }
+  });
+}
 function framedInitializeOk(result) {
   const stdout = result.stdout || '';
   return result.status === 0 && stdout.includes('Content-Length:') && stdout.includes('code-intel');
@@ -90,6 +98,15 @@ const list = run('node', ['mcp/code-intel-server/index.js', '--list-tools']);
 check('MCP server list-tools starts', list.status === 0, list.stderr || list.stdout.slice(0, 200));
 const framedInit = run(process.execPath, ['mcp/code-intel-server/index.js'], { input: initializeFrame() });
 check('MCP framed initialize works', framedInitializeOk(framedInit), framedEvidence(framedInit));
+const unsupportedFramedInit = run(process.execPath, ['mcp/code-intel-server/index.js'], { input: unsupportedInitializeFrame() });
+check(
+  'MCP initialize does not echo unsupported protocol versions',
+  unsupportedFramedInit.status === 0 &&
+    unsupportedFramedInit.stdout.includes('Content-Length:') &&
+    unsupportedFramedInit.stdout.includes('"protocolVersion":"2024-11-05"') &&
+    !unsupportedFramedInit.stdout.includes('2099-99-99'),
+  framedEvidence(unsupportedFramedInit)
+);
 let listed = [];
 try { listed = JSON.parse(list.stdout).tools.map((t) => t.name); } catch {}
 check('tool list includes expected tools', EXPECTED_TOOLS.every((t) => listed.includes(t)), listed.join(', '));
@@ -112,12 +129,35 @@ const missingAst = callTool('ast_grep_search', { repoRoot: ROOT, language: 'defi
 check('ast-grep unsupported language reports unavailable cleanly', missingAst.status === 'unavailable' && missingAst.fallbackReason.includes('unsupported'), JSON.stringify(missingAst));
 const missingLsp = callTool('lsp_find_references', { repoRoot: ROOT, language: 'json', file: 'package.json', position: { line: 0, character: 0 } });
 check('LSP tool reports unavailable cleanly when no server declared', missingLsp.status === 'unavailable' && missingLsp.fallbackReason, JSON.stringify(missingLsp));
-const noAstPath = run(process.execPath, ['mcp/code-intel-server/index.js', '--call-tool', 'ast_grep_search', '--args', JSON.stringify({ repoRoot: ROOT, language: 'typescript', pattern: 'class $A' })], { env: { ...process.env, PATH: '/usr/bin:/bin' } });
+const emptyToolPathRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-empty-path-'));
 try {
-  const noAst = JSON.parse(noAstPath.stdout || '{}');
-  check('missing ast-grep PATH simulation reports explicit fallback', noAst.status === 'unavailable' && noAst.fallbackReason.includes('ast-grep executable was not found') && noAst.commandPolicy.includes('sg'), noAstPath.stdout.slice(0, 500) || noAstPath.stderr.slice(0, 500));
-} catch (error) {
-  check('missing ast-grep PATH simulation reports explicit fallback', false, error.message);
+  const emptyToolPath = path.join(emptyToolPathRoot, 'bin');
+  fs.mkdirSync(emptyToolPath, { recursive: true });
+  const noAstEnv = { ...process.env, PATH: emptyToolPath };
+  const noAstLspFallbackRun = run(process.execPath, ['mcp/code-intel-server/index.js', '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: ROOT, language: 'json', file: 'package.json' })], {
+    env: noAstEnv
+  });
+  try {
+    const noAstLspFallback = JSON.parse(noAstLspFallbackRun.stdout || '{}');
+    check(
+      'LSP unavailable fallback omits ast-grep when executable is missing',
+      noAstLspFallback.status === 'unavailable' &&
+        noAstLspFallback.fallbackUsed === 'rg/grep' &&
+        noAstLspFallback.fallbackReason === 'LSP command missing',
+      noAstLspFallbackRun.stdout.slice(0, 500) || noAstLspFallbackRun.stderr.slice(0, 500)
+    );
+  } catch (error) {
+    check('LSP unavailable fallback omits ast-grep when executable is missing', false, error.message);
+  }
+  const noAstPath = run(process.execPath, ['mcp/code-intel-server/index.js', '--call-tool', 'ast_grep_search', '--args', JSON.stringify({ repoRoot: ROOT, language: 'typescript', pattern: 'class $A' })], { env: noAstEnv });
+  try {
+    const noAst = JSON.parse(noAstPath.stdout || '{}');
+    check('missing ast-grep PATH simulation reports explicit fallback', noAst.status === 'unavailable' && noAst.fallbackReason.includes('ast-grep executable was not found') && noAst.commandPolicy.includes('sg'), noAstPath.stdout.slice(0, 500) || noAstPath.stderr.slice(0, 500));
+  } catch (error) {
+    check('missing ast-grep PATH simulation reports explicit fallback', false, error.message);
+  }
+} finally {
+  fs.rmSync(emptyToolPathRoot, { recursive: true, force: true });
 }
 const fakeLspRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-fake-lsp-'));
 try {
