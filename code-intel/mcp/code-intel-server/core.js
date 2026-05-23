@@ -85,7 +85,7 @@ export function detectExecutable(command, args = ['--version']) {
   };
 }
 
-function executableCandidates(command) {
+function executableCandidates(command, baseDir = process.cwd()) {
   const hasPathSeparator = command.includes('/') || (process.platform === 'win32' && /[\\/]/.test(command));
   const extensions = process.platform === 'win32'
     ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean)
@@ -93,14 +93,16 @@ function executableCandidates(command) {
   const names = process.platform === 'win32' && !path.extname(command)
     ? extensions.map((ext) => `${command}${ext}`)
     : [command];
-  if (hasPathSeparator) return names;
+  if (hasPathSeparator) {
+    return names.map((name) => path.isAbsolute(name) ? name : path.resolve(baseDir, name));
+  }
   const dirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
   return dirs.flatMap((dir) => names.map((name) => path.join(dir, name)));
 }
 
-export function executableOnPath(command) {
+export function executableOnPath(command, baseDir = process.cwd()) {
   if (!command) return { command, available: false, reason: 'no executable declared' };
-  for (const candidate of executableCandidates(command)) {
+  for (const candidate of executableCandidates(command, baseDir)) {
     try {
       fs.accessSync(candidate, fs.constants.X_OK);
       return { command, available: true, path: candidate, reason: 'executable found' };
@@ -137,10 +139,10 @@ function firstToken(commandLine) {
   return splitCommandLine(commandLine)[0] || '';
 }
 
-export function commandAvailable(commandLine) {
+export function commandAvailable(commandLine, baseDir = process.cwd()) {
   const command = firstToken(commandLine);
   if (!command) return { command: commandLine, available: false, reason: 'no command candidate declared' };
-  const result = executableOnPath(command);
+  const result = executableOnPath(command, baseDir);
   return {
     command: commandLine,
     executable: command,
@@ -231,7 +233,7 @@ export function discoverCapabilities(repoRoot = process.cwd()) {
   const languages = {};
   for (const adapter of registry.adapters) {
     const present = inventory.languages[adapter.language]?.files || 0;
-    const lspCommands = adapter.lsp.commands.map(commandAvailable);
+    const lspCommands = adapter.lsp.commands.map((command) => commandAvailable(command, repoRoot));
     const lspAvailable = lspCommands.find((c) => c.available)?.command || null;
     languages[adapter.language] = {
       presentFiles: present,
@@ -384,9 +386,10 @@ function lspUnavailable(method, args = {}, reason = 'no LSP server command detec
 
 function findLspCommand(args = {}) {
   const registry = loadRegistry();
-  const adapter = args.language ? adapterForLanguage(args.language, registry) : args.file ? adapterForFile(path.resolve(args.repoRoot || process.cwd(), args.file), registry) : null;
+  const repoRoot = path.resolve(args.repoRoot || process.cwd());
+  const adapter = args.language ? adapterForLanguage(args.language, registry) : args.file ? adapterForFile(path.resolve(repoRoot, args.file), registry) : null;
   if (!adapter) return { adapter: null, command: null };
-  const available = adapter.lsp.commands.map(commandAvailable).find((c) => c.available);
+  const available = adapter.lsp.commands.map((command) => commandAvailable(command, repoRoot)).find((c) => c.available);
   return { adapter, command: available?.command || null };
 }
 

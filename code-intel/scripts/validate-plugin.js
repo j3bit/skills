@@ -215,6 +215,60 @@ await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-l
 } finally {
   fs.rmSync(fakeLspRoot, { recursive: true, force: true });
 }
+const relativeLspRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-relative-lsp-'));
+try {
+  const targetRepo = path.join(relativeLspRoot, 'repo');
+  const localBin = path.join(targetRepo, 'node_modules', '.bin');
+  fs.mkdirSync(path.join(targetRepo, 'src'), { recursive: true });
+  fs.mkdirSync(localBin, { recursive: true });
+  fs.writeFileSync(path.join(targetRepo, 'src', 'math.ts'), 'export function add(a: number, b: number) { return a + b; }\n');
+
+  const localLsp = path.join(localBin, 'fake-relative-lsp');
+  fs.writeFileSync(localLsp, `#!/usr/bin/env node
+await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'fixtures/lsp/fake-lsp-server.js')).href)});
+`);
+  fs.chmodSync(localLsp, 0o755);
+
+  const relativeRegistryPath = path.join(relativeLspRoot, 'registry.json');
+  writeJson(relativeRegistryPath, {
+    version: 'test-relative-lsp',
+    adapters: [{
+      language: 'typescript',
+      extensions: ['.ts'],
+      astGrep: { languageId: 'typescript', supported: 'builtin' },
+      lsp: { commands: ['./node_modules/.bin/fake-relative-lsp --stdio'], capabilities: ['symbols'] },
+      fallback: ['rg', 'grep'],
+      fixtures: { repo: targetRepo, expectedAst: true, expectedLsp: true }
+    }]
+  });
+
+  const relativeEnv = { ...process.env, CODE_INTEL_REGISTRY_PATH: relativeRegistryPath };
+  const relativeDiscoveryProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'capability_discover', '--args', JSON.stringify({ repoRoot: targetRepo })], {
+    env: relativeEnv
+  });
+  const relativeDiscovery = JSON.parse(relativeDiscoveryProbe.stdout || '{}');
+  check(
+    'LSP executable detection resolves relative commands from repoRoot',
+    relativeDiscovery.languages?.typescript?.lsp === 'commandDetected' &&
+      relativeDiscovery.languages.typescript.lspCommand === './node_modules/.bin/fake-relative-lsp --stdio',
+    relativeDiscoveryProbe.stdout.slice(0, 800) || relativeDiscoveryProbe.stderr.slice(0, 800)
+  );
+
+  const relativeLspProbe = run('node', ['mcp/code-intel-server/index.js', '--call-tool', 'lsp_symbols', '--args', JSON.stringify({ repoRoot: targetRepo, file: 'src/math.ts' })], {
+    env: relativeEnv
+  });
+  const relativeLspOutput = JSON.parse(relativeLspProbe.stdout || '{}');
+  check(
+    'LSP tools execute repo-relative command candidates from repoRoot',
+    relativeLspProbe.status === 0 && relativeLspOutput.status === 'ok' && relativeLspOutput.lspState === 'methodVerified',
+    relativeLspProbe.stdout.slice(0, 800) || relativeLspProbe.stderr.slice(0, 800)
+  );
+} catch (error) {
+  check('LSP executable detection resolves relative commands from repoRoot', false, error.message);
+  check('LSP tools execute repo-relative command candidates from repoRoot', false, error.message);
+} finally {
+  fs.rmSync(relativeLspRoot, { recursive: true, force: true });
+}
 const strictLspRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'code-intel-strict-lsp-'));
 try {
   const strictRegistry = {
