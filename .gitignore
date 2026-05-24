@@ -16,3 +16,7 @@ code-intel/**/docs/code-intel/
 
 # Vendored/source reference dumps that are regenerated locally
 the-code-guru/references/source/
+
+# Local Superpowers execution plans; keep durable specs tracked.
+code-intel/docs/superpowers/plans/
+code-intel/.omx/superpowers/plans/
