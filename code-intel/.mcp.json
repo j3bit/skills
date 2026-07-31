@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "code-intel": {
-      "command": "node",
-      "args": ["mcp/code-intel-server/index.js"],
-      "env": {}
-    }
-  }
-}
